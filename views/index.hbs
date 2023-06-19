@@ -1,0 +1,10 @@
+{{#extend "main"}}
+{{#content "body"}}
+<h1>Welcome to Our Coffee Shop</h1>
+<ul>
+    {{#each products}}
+    <li>{{this.name}} - {{this.price}}</li>
+    {{/each}}
+</ul>
+{{/content}}
+{{/extend}}

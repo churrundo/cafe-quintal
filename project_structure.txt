@@ -1,0 +1,2229 @@
+--- Folder Structure ---
+[.git]
+    ├── FETCH_HEAD
+    ├── HEAD
+    ├── [branches]
+    ├── config
+    ├── description
+    ├── [hooks]
+        ├── applypatch-msg.sample
+        ├── commit-msg.sample
+        ├── fsmonitor-watchman.sample
+        ├── post-update.sample
+        ├── pre-applypatch.sample
+        ├── pre-commit.sample
+        ├── pre-merge-commit.sample
+        ├── pre-push.sample
+        ├── pre-rebase.sample
+        ├── pre-receive.sample
+        ├── prepare-commit-msg.sample
+        ├── push-to-checkout.sample
+        └── update.sample
+    ├── [info]
+        └── exclude
+    ├── [objects]
+        ├── [info]
+        └── [pack]
+    └── [refs]
+        ├── [heads]
+        └── [tags]
+.gitignore
+app.js
+[bin]
+    └── www
+[models]
+    └── users.js
+package-lock.json
+package.json
+[public]
+    ├── [images]
+    ├── [javascripts]
+    └── [stylesheets]
+        └── style.css
+[routes]
+    ├── [auth-routes]
+        └── auth.routes.js
+    ├── index.js
+    └── users.js
+[views]
+    ├── [auth]
+        ├── login.hbs
+        └── signup.hbs
+    ├── error.hbs
+    ├── index.hbs
+    └── layout.hbs
+
+--- File Contents ---
+
+--- File: .git/FETCH_HEAD ---
+
+
+--- File: .git/HEAD ---
+ref: refs/heads/main
+
+
+--- File: .git/config ---
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+
+
+--- File: .git/description ---
+Unnamed repository; edit this file 'description' to name the repository.
+
+
+--- File: .git/hooks/applypatch-msg.sample ---
+#!/bin/sh
+#
+# An example hook script to check the commit log message taken by
+# applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.  The hook is
+# allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "applypatch-msg".
+
+. git-sh-setup
+commitmsg="$(git rev-parse --git-path hooks/commit-msg)"
+test -x "$commitmsg" && exec "$commitmsg" ${1+"$@"}
+:
+
+
+--- File: .git/hooks/commit-msg.sample ---
+#!/bin/sh
+#
+# An example hook script to check the commit log message.
+# Called by "git commit" with one argument, the name of the file
+# that has the commit message.  The hook should exit with non-zero
+# status after issuing an appropriate message if it wants to stop the
+# commit.  The hook is allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "commit-msg".
+
+# Uncomment the below to add a Signed-off-by line to the message.
+# Doing this in a hook is a bad idea in general, but the prepare-commit-msg
+# hook is more suited to it.
+#
+# SOB=$(git var GIT_AUTHOR_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# grep -qs "^$SOB" "$1" || echo "$SOB" >> "$1"
+
+# This example catches duplicate Signed-off-by lines.
+
+test "" = "$(grep '^Signed-off-by: ' "$1" |
+	 sort | uniq -c | sed -e '/^[ 	]*1[ 	]/d')" || {
+	echo >&2 Duplicate Signed-off-by lines.
+	exit 1
+}
+
+
+--- File: .git/hooks/fsmonitor-watchman.sample ---
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use IPC::Open2;
+
+# An example hook script to integrate Watchman
+# (https://facebook.github.io/watchman/) with git to speed up detecting
+# new and modified files.
+#
+# The hook is passed a version (currently 2) and last update token
+# formatted as a string and outputs to stdout a new update token and
+# all files that have been modified since the update token. Paths must
+# be relative to the root of the working tree and separated by a single NUL.
+#
+# To enable this hook, rename this file to "query-watchman" and set
+# 'git config core.fsmonitor .git/hooks/query-watchman'
+#
+my ($version, $last_update_token) = @ARGV;
+
+# Uncomment for debugging
+# print STDERR "$0 $version $last_update_token\n";
+
+# Check the hook interface version
+if ($version ne 2) {
+	die "Unsupported query-fsmonitor hook version '$version'.\n" .
+	    "Falling back to scanning...\n";
+}
+
+my $git_work_tree = get_working_dir();
+
+my $retry = 1;
+
+my $json_pkg;
+eval {
+	require JSON::XS;
+	$json_pkg = "JSON::XS";
+	1;
+} or do {
+	require JSON::PP;
+	$json_pkg = "JSON::PP";
+};
+
+launch_watchman();
+
+sub launch_watchman {
+	my $o = watchman_query();
+	if (is_work_tree_watched($o)) {
+		output_result($o->{clock}, @{$o->{files}});
+	}
+}
+
+sub output_result {
+	my ($clockid, @files) = @_;
+
+	# Uncomment for debugging watchman output
+	# open (my $fh, ">", ".git/watchman-output.out");
+	# binmode $fh, ":utf8";
+	# print $fh "$clockid\n@files\n";
+	# close $fh;
+
+	binmode STDOUT, ":utf8";
+	print $clockid;
+	print "\0";
+	local $, = "\0";
+	print @files;
+}
+
+sub watchman_clock {
+	my $response = qx/watchman clock "$git_work_tree"/;
+	die "Failed to get clock id on '$git_work_tree'.\n" .
+		"Falling back to scanning...\n" if $? != 0;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub watchman_query {
+	my $pid = open2(\*CHLD_OUT, \*CHLD_IN, 'watchman -j --no-pretty')
+	or die "open2() failed: $!\n" .
+	"Falling back to scanning...\n";
+
+	# In the query expression below we're asking for names of files that
+	# changed since $last_update_token but not from the .git folder.
+	#
+	# To accomplish this, we're using the "since" generator to use the
+	# recency index to select candidate nodes and "fields" to limit the
+	# output to file names only. Then we're using the "expression" term to
+	# further constrain the results.
+	if (substr($last_update_token, 0, 1) eq "c") {
+		$last_update_token = "\"$last_update_token\"";
+	}
+	my $query = <<"	END";
+		["query", "$git_work_tree", {
+			"since": $last_update_token,
+			"fields": ["name"],
+			"expression": ["not", ["dirname", ".git"]]
+		}]
+	END
+
+	# Uncomment for debugging the watchman query
+	# open (my $fh, ">", ".git/watchman-query.json");
+	# print $fh $query;
+	# close $fh;
+
+	print CHLD_IN $query;
+	close CHLD_IN;
+	my $response = do {local $/; <CHLD_OUT>};
+
+	# Uncomment for debugging the watch response
+	# open ($fh, ">", ".git/watchman-response.json");
+	# print $fh $response;
+	# close $fh;
+
+	die "Watchman: command returned no output.\n" .
+	"Falling back to scanning...\n" if $response eq "";
+	die "Watchman: command returned invalid output: $response\n" .
+	"Falling back to scanning...\n" unless $response =~ /^\{/;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub is_work_tree_watched {
+	my ($output) = @_;
+	my $error = $output->{error};
+	if ($retry > 0 and $error and $error =~ m/unable to resolve root .* directory (.*) is not watched/) {
+		$retry--;
+		my $response = qx/watchman watch "$git_work_tree"/;
+		die "Failed to make watchman watch '$git_work_tree'.\n" .
+		    "Falling back to scanning...\n" if $? != 0;
+		$output = $json_pkg->new->utf8->decode($response);
+		$error = $output->{error};
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		# Uncomment for debugging watchman output
+		# open (my $fh, ">", ".git/watchman-output.out");
+		# close $fh;
+
+		# Watchman will always return all files on the first query so
+		# return the fast "everything is dirty" flag to git and do the
+		# Watchman query just to get it over with now so we won't pay
+		# the cost in git to look up each individual file.
+		my $o = watchman_clock();
+		$error = $output->{error};
+
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		output_result($o->{clock}, ("/"));
+		$last_update_token = $o->{clock};
+
+		eval { launch_watchman() };
+		return 0;
+	}
+
+	die "Watchman: $error.\n" .
+	"Falling back to scanning...\n" if $error;
+
+	return 1;
+}
+
+sub get_working_dir {
+	my $working_dir;
+	if ($^O =~ 'msys' || $^O =~ 'cygwin') {
+		$working_dir = Win32::GetCwd();
+		$working_dir =~ tr/\\/\//;
+	} else {
+		require Cwd;
+		$working_dir = Cwd::cwd();
+	}
+
+	return $working_dir;
+}
+
+
+--- File: .git/hooks/post-update.sample ---
+#!/bin/sh
+#
+# An example hook script to prepare a packed repository for use over
+# dumb transports.
+#
+# To enable this hook, rename this file to "post-update".
+
+exec git update-server-info
+
+
+--- File: .git/hooks/pre-applypatch.sample ---
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed
+# by applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-applypatch".
+
+. git-sh-setup
+precommit="$(git rev-parse --git-path hooks/pre-commit)"
+test -x "$precommit" && exec "$precommit" ${1+"$@"}
+:
+
+
+--- File: .git/hooks/pre-commit.sample ---
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git commit" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message if
+# it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-commit".
+
+if git rev-parse --verify HEAD >/dev/null 2>&1
+then
+	against=HEAD
+else
+	# Initial commit: diff against an empty tree object
+	against=$(git hash-object -t tree /dev/null)
+fi
+
+# If you want to allow non-ASCII filenames set this variable to true.
+allownonascii=$(git config --type=bool hooks.allownonascii)
+
+# Redirect output to stderr.
+exec 1>&2
+
+# Cross platform projects tend to avoid non-ASCII filenames; prevent
+# them from being added to the repository. We exploit the fact that the
+# printable range starts at the space character and ends with tilde.
+if [ "$allownonascii" != "true" ] &&
+	# Note that the use of brackets around a tr range is ok here, (it's
+	# even required, for portability to Solaris 10's /usr/bin/tr), since
+	# the square bracket bytes happen to fall in the designated range.
+	test $(git diff --cached --name-only --diff-filter=A -z $against |
+	  LC_ALL=C tr -d '[ -~]\0' | wc -c) != 0
+then
+	cat <<\EOF
+Error: Attempt to add a non-ASCII file name.
+
+This can cause problems if you want to work with people on other platforms.
+
+To be portable it is advisable to rename the file.
+
+If you know what you are doing you can disable this check using:
+
+  git config hooks.allownonascii true
+EOF
+	exit 1
+fi
+
+# If there are whitespace errors, print the offending file names and fail.
+exec git diff-index --check --cached $against --
+
+
+--- File: .git/hooks/pre-merge-commit.sample ---
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git merge" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message to
+# stderr if it wants to stop the merge commit.
+#
+# To enable this hook, rename this file to "pre-merge-commit".
+
+. git-sh-setup
+test -x "$GIT_DIR/hooks/pre-commit" &&
+        exec "$GIT_DIR/hooks/pre-commit"
+:
+
+
+--- File: .git/hooks/pre-push.sample ---
+#!/bin/sh
+
+# An example hook script to verify what is about to be pushed.  Called by "git
+# push" after it has checked the remote status, but before anything has been
+# pushed.  If this script exits with a non-zero status nothing will be pushed.
+#
+# This hook is called with the following parameters:
+#
+# $1 -- Name of the remote to which the push is being done
+# $2 -- URL to which the push is being done
+#
+# If pushing without using a named remote those arguments will be equal.
+#
+# Information about the commits which are being pushed is supplied as lines to
+# the standard input in the form:
+#
+#   <local ref> <local oid> <remote ref> <remote oid>
+#
+# This sample shows how to prevent push of commits where the log message starts
+# with "WIP" (work in progress).
+
+remote="$1"
+url="$2"
+
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+
+while read local_ref local_oid remote_ref remote_oid
+do
+	if test "$local_oid" = "$zero"
+	then
+		# Handle delete
+		:
+	else
+		if test "$remote_oid" = "$zero"
+		then
+			# New branch, examine all commits
+			range="$local_oid"
+		else
+			# Update to existing branch, examine new commits
+			range="$remote_oid..$local_oid"
+		fi
+
+		# Check for WIP commit
+		commit=$(git rev-list -n 1 --grep '^WIP' "$range")
+		if test -n "$commit"
+		then
+			echo >&2 "Found WIP commit in $local_ref, not pushing"
+			exit 1
+		fi
+	fi
+done
+
+exit 0
+
+
+--- File: .git/hooks/pre-rebase.sample ---
+#!/bin/sh
+#
+# Copyright (c) 2006, 2008 Junio C Hamano
+#
+# The "pre-rebase" hook is run just before "git rebase" starts doing
+# its job, and can prevent the command from running by exiting with
+# non-zero status.
+#
+# The hook is called with the following parameters:
+#
+# $1 -- the upstream the series was forked from.
+# $2 -- the branch being rebased (or empty when rebasing the current branch).
+#
+# This sample shows how to prevent topic branches that are already
+# merged to 'next' branch from getting rebased, because allowing it
+# would result in rebasing already published history.
+
+publish=next
+basebranch="$1"
+if test "$#" = 2
+then
+	topic="refs/heads/$2"
+else
+	topic=`git symbolic-ref HEAD` ||
+	exit 0 ;# we do not interrupt rebasing detached HEAD
+fi
+
+case "$topic" in
+refs/heads/??/*)
+	;;
+*)
+	exit 0 ;# we do not interrupt others.
+	;;
+esac
+
+# Now we are dealing with a topic branch being rebased
+# on top of master.  Is it OK to rebase it?
+
+# Does the topic really exist?
+git show-ref -q "$topic" || {
+	echo >&2 "No such branch $topic"
+	exit 1
+}
+
+# Is topic fully merged to master?
+not_in_master=`git rev-list --pretty=oneline ^master "$topic"`
+if test -z "$not_in_master"
+then
+	echo >&2 "$topic is fully merged to master; better remove it."
+	exit 1 ;# we could allow it, but there is no point.
+fi
+
+# Is topic ever merged to next?  If so you should not be rebasing it.
+only_next_1=`git rev-list ^master "^$topic" ${publish} | sort`
+only_next_2=`git rev-list ^master           ${publish} | sort`
+if test "$only_next_1" = "$only_next_2"
+then
+	not_in_topic=`git rev-list "^$topic" master`
+	if test -z "$not_in_topic"
+	then
+		echo >&2 "$topic is already up to date with master"
+		exit 1 ;# we could allow it, but there is no point.
+	else
+		exit 0
+	fi
+else
+	not_in_next=`git rev-list --pretty=oneline ^${publish} "$topic"`
+	/usr/bin/perl -e '
+		my $topic = $ARGV[0];
+		my $msg = "* $topic has commits already merged to public branch:\n";
+		my (%not_in_next) = map {
+			/^([0-9a-f]+) /;
+			($1 => 1);
+		} split(/\n/, $ARGV[1]);
+		for my $elem (map {
+				/^([0-9a-f]+) (.*)$/;
+				[$1 => $2];
+			} split(/\n/, $ARGV[2])) {
+			if (!exists $not_in_next{$elem->[0]}) {
+				if ($msg) {
+					print STDERR $msg;
+					undef $msg;
+				}
+				print STDERR " $elem->[1]\n";
+			}
+		}
+	' "$topic" "$not_in_next" "$not_in_master"
+	exit 1
+fi
+
+<<\DOC_END
+
+This sample hook safeguards topic branches that have been
+published from being rewound.
+
+The workflow assumed here is:
+
+ * Once a topic branch forks from "master", "master" is never
+   merged into it again (either directly or indirectly).
+
+ * Once a topic branch is fully cooked and merged into "master",
+   it is deleted.  If you need to build on top of it to correct
+   earlier mistakes, a new topic branch is created by forking at
+   the tip of the "master".  This is not strictly necessary, but
+   it makes it easier to keep your history simple.
+
+ * Whenever you need to test or publish your changes to topic
+   branches, merge them into "next" branch.
+
+The script, being an example, hardcodes the publish branch name
+to be "next", but it is trivial to make it configurable via
+$GIT_DIR/config mechanism.
+
+With this workflow, you would want to know:
+
+(1) ... if a topic branch has ever been merged to "next".  Young
+    topic branches can have stupid mistakes you would rather
+    clean up before publishing, and things that have not been
+    merged into other branches can be easily rebased without
+    affecting other people.  But once it is published, you would
+    not want to rewind it.
+
+(2) ... if a topic branch has been fully merged to "master".
+    Then you can delete it.  More importantly, you should not
+    build on top of it -- other people may already want to
+    change things related to the topic as patches against your
+    "master", so if you need further changes, it is better to
+    fork the topic (perhaps with the same name) afresh from the
+    tip of "master".
+
+Let's look at this example:
+
+		   o---o---o---o---o---o---o---o---o---o "next"
+		  /       /           /           /
+		 /   a---a---b A     /           /
+		/   /               /           /
+	       /   /   c---c---c---c B         /
+	      /   /   /             \         /
+	     /   /   /   b---b C     \       /
+	    /   /   /   /             \     /
+    ---o---o---o---o---o---o---o---o---o---o---o "master"
+
+
+A, B and C are topic branches.
+
+ * A has one fix since it was merged up to "next".
+
+ * B has finished.  It has been fully merged up to "master" and "next",
+   and is ready to be deleted.
+
+ * C has not merged to "next" at all.
+
+We would want to allow C to be rebased, refuse A, and encourage
+B to be deleted.
+
+To compute (1):
+
+	git rev-list ^master ^topic next
+	git rev-list ^master        next
+
+	if these match, topic has not merged in next at all.
+
+To compute (2):
+
+	git rev-list master..topic
+
+	if this is empty, it is fully merged to "master".
+
+DOC_END
+
+
+--- File: .git/hooks/pre-receive.sample ---
+#!/bin/sh
+#
+# An example hook script to make use of push options.
+# The example simply echoes all push options that start with 'echoback='
+# and rejects all pushes when the "reject" push option is used.
+#
+# To enable this hook, rename this file to "pre-receive".
+
+if test -n "$GIT_PUSH_OPTION_COUNT"
+then
+	i=0
+	while test "$i" -lt "$GIT_PUSH_OPTION_COUNT"
+	do
+		eval "value=\$GIT_PUSH_OPTION_$i"
+		case "$value" in
+		echoback=*)
+			echo "echo from the pre-receive-hook: ${value#*=}" >&2
+			;;
+		reject)
+			exit 1
+		esac
+		i=$((i + 1))
+	done
+fi
+
+
+--- File: .git/hooks/prepare-commit-msg.sample ---
+#!/bin/sh
+#
+# An example hook script to prepare the commit log message.
+# Called by "git commit" with the name of the file that has the
+# commit message, followed by the description of the commit
+# message's source.  The hook's purpose is to edit the commit
+# message file.  If the hook fails with a non-zero status,
+# the commit is aborted.
+#
+# To enable this hook, rename this file to "prepare-commit-msg".
+
+# This hook includes three examples. The first one removes the
+# "# Please enter the commit message..." help message.
+#
+# The second includes the output of "git diff --name-status -r"
+# into the message, just before the "git status" output.  It is
+# commented because it doesn't cope with --amend or with squashed
+# commits.
+#
+# The third example adds a Signed-off-by line to the message, that can
+# still be edited.  This is rarely a good idea.
+
+COMMIT_MSG_FILE=$1
+COMMIT_SOURCE=$2
+SHA1=$3
+
+/usr/bin/perl -i.bak -ne 'print unless(m/^. Please enter the commit message/..m/^#$/)' "$COMMIT_MSG_FILE"
+
+# case "$COMMIT_SOURCE,$SHA1" in
+#  ,|template,)
+#    /usr/bin/perl -i.bak -pe '
+#       print "\n" . `git diff --cached --name-status -r`
+# 	 if /^#/ && $first++ == 0' "$COMMIT_MSG_FILE" ;;
+#  *) ;;
+# esac
+
+# SOB=$(git var GIT_COMMITTER_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# git interpret-trailers --in-place --trailer "$SOB" "$COMMIT_MSG_FILE"
+# if test -z "$COMMIT_SOURCE"
+# then
+#   /usr/bin/perl -i.bak -pe 'print "\n" if !$first_line++' "$COMMIT_MSG_FILE"
+# fi
+
+
+--- File: .git/hooks/push-to-checkout.sample ---
+#!/bin/sh
+
+# An example hook script to update a checked-out tree on a git push.
+#
+# This hook is invoked by git-receive-pack(1) when it reacts to git
+# push and updates reference(s) in its repository, and when the push
+# tries to update the branch that is currently checked out and the
+# receive.denyCurrentBranch configuration variable is set to
+# updateInstead.
+#
+# By default, such a push is refused if the working tree and the index
+# of the remote repository has any difference from the currently
+# checked out commit; when both the working tree and the index match
+# the current commit, they are updated to match the newly pushed tip
+# of the branch. This hook is to be used to override the default
+# behaviour; however the code below reimplements the default behaviour
+# as a starting point for convenient modification.
+#
+# The hook receives the commit with which the tip of the current
+# branch is going to be updated:
+commit=$1
+
+# It can exit with a non-zero status to refuse the push (when it does
+# so, it must not modify the index or the working tree).
+die () {
+	echo >&2 "$*"
+	exit 1
+}
+
+# Or it can make any necessary changes to the working tree and to the
+# index to bring them to the desired state when the tip of the current
+# branch is updated to the new commit, and exit with a zero status.
+#
+# For example, the hook can simply run git read-tree -u -m HEAD "$1"
+# in order to emulate git fetch that is run in the reverse direction
+# with git push, as the two-tree form of git read-tree -u -m is
+# essentially the same as git switch or git checkout that switches
+# branches while keeping the local changes in the working tree that do
+# not interfere with the difference between the branches.
+
+# The below is a more-or-less exact translation to shell of the C code
+# for the default behaviour for git's push-to-checkout hook defined in
+# the push_to_deploy() function in builtin/receive-pack.c.
+#
+# Note that the hook will be executed from the repository directory,
+# not from the working tree, so if you want to perform operations on
+# the working tree, you will have to adapt your code accordingly, e.g.
+# by adding "cd .." or using relative paths.
+
+if ! git update-index -q --ignore-submodules --refresh
+then
+	die "Up-to-date check failed"
+fi
+
+if ! git diff-files --quiet --ignore-submodules --
+then
+	die "Working directory has unstaged changes"
+fi
+
+# This is a rough translation of:
+#
+#   head_has_history() ? "HEAD" : EMPTY_TREE_SHA1_HEX
+if git cat-file -e HEAD 2>/dev/null
+then
+	head=HEAD
+else
+	head=$(git hash-object -t tree --stdin </dev/null)
+fi
+
+if ! git diff-index --quiet --cached --ignore-submodules $head --
+then
+	die "Working directory has staged changes"
+fi
+
+if ! git read-tree -u -m "$commit"
+then
+	die "Could not update working tree to new HEAD"
+fi
+
+
+--- File: .git/hooks/update.sample ---
+#!/bin/sh
+#
+# An example hook script to block unannotated tags from entering.
+# Called by "git receive-pack" with arguments: refname sha1-old sha1-new
+#
+# To enable this hook, rename this file to "update".
+#
+# Config
+# ------
+# hooks.allowunannotated
+#   This boolean sets whether unannotated tags will be allowed into the
+#   repository.  By default they won't be.
+# hooks.allowdeletetag
+#   This boolean sets whether deleting tags will be allowed in the
+#   repository.  By default they won't be.
+# hooks.allowmodifytag
+#   This boolean sets whether a tag may be modified after creation. By default
+#   it won't be.
+# hooks.allowdeletebranch
+#   This boolean sets whether deleting branches will be allowed in the
+#   repository.  By default they won't be.
+# hooks.denycreatebranch
+#   This boolean sets whether remotely creating branches will be denied
+#   in the repository.  By default this is allowed.
+#
+
+# --- Command line
+refname="$1"
+oldrev="$2"
+newrev="$3"
+
+# --- Safety check
+if [ -z "$GIT_DIR" ]; then
+	echo "Don't run this script from the command line." >&2
+	echo " (if you want, you could supply GIT_DIR then run" >&2
+	echo "  $0 <ref> <oldrev> <newrev>)" >&2
+	exit 1
+fi
+
+if [ -z "$refname" -o -z "$oldrev" -o -z "$newrev" ]; then
+	echo "usage: $0 <ref> <oldrev> <newrev>" >&2
+	exit 1
+fi
+
+# --- Config
+allowunannotated=$(git config --type=bool hooks.allowunannotated)
+allowdeletebranch=$(git config --type=bool hooks.allowdeletebranch)
+denycreatebranch=$(git config --type=bool hooks.denycreatebranch)
+allowdeletetag=$(git config --type=bool hooks.allowdeletetag)
+allowmodifytag=$(git config --type=bool hooks.allowmodifytag)
+
+# check for no description
+projectdesc=$(sed -e '1q' "$GIT_DIR/description")
+case "$projectdesc" in
+"Unnamed repository"* | "")
+	echo "*** Project description file hasn't been set" >&2
+	exit 1
+	;;
+esac
+
+# --- Check types
+# if $newrev is 0000...0000, it's a commit to delete a ref.
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+if [ "$newrev" = "$zero" ]; then
+	newrev_type=delete
+else
+	newrev_type=$(git cat-file -t $newrev)
+fi
+
+case "$refname","$newrev_type" in
+	refs/tags/*,commit)
+		# un-annotated tag
+		short_refname=${refname##refs/tags/}
+		if [ "$allowunannotated" != "true" ]; then
+			echo "*** The un-annotated tag, $short_refname, is not allowed in this repository" >&2
+			echo "*** Use 'git tag [ -a | -s ]' for tags you want to propagate." >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,delete)
+		# delete tag
+		if [ "$allowdeletetag" != "true" ]; then
+			echo "*** Deleting a tag is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,tag)
+		# annotated tag
+		if [ "$allowmodifytag" != "true" ] && git rev-parse $refname > /dev/null 2>&1
+		then
+			echo "*** Tag '$refname' already exists." >&2
+			echo "*** Modifying a tag is not allowed in this repository." >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,commit)
+		# branch
+		if [ "$oldrev" = "$zero" -a "$denycreatebranch" = "true" ]; then
+			echo "*** Creating a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,delete)
+		# delete branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/remotes/*,commit)
+		# tracking branch
+		;;
+	refs/remotes/*,delete)
+		# delete tracking branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a tracking branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	*)
+		# Anything else (is there anything else?)
+		echo "*** Update hook: unknown type of update to ref $refname of type $newrev_type" >&2
+		exit 1
+		;;
+esac
+
+# --- Finished
+exit 0
+
+
+--- File: .git/info/exclude ---
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+
+
+--- File: .gitignore ---
+/.env
+/node_modules
+
+--- File: app.js ---
+const createError = require('http-errors');
+const express = require('express');
+const path = require('path');
+const cookieParser = require('cookie-parser');
+const logger = require('morgan');
+
+const indexRouter = require('./routes/index');
+const usersRouter = require('./routes/users');
+
+const app = express();
+
+// view engine setup
+app.set('views', path.join(__dirname, 'views'));
+app.set('view engine', 'jade');
+
+app.use(logger('dev'));
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+app.use(cookieParser());
+app.use(express.static(path.join(__dirname, 'public')));
+
+app.use('/', indexRouter);
+app.use('/users', usersRouter);
+
+// catch 404 and forward to error handler
+app.use(function(req, res, next) {
+  next(createError(404));
+});
+
+// error handler
+app.use(function(err, req, res, next) {
+  // set locals, only providing error in development
+  res.locals.message = err.message;
+  res.locals.error = req.app.get('env') === 'development' ? err : {};
+
+  // render the error page
+  res.status(err.status || 500);
+  res.render('error');
+});
+
+module.exports = app;
+
+
+--- File: bin/www ---
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+
+const app = require('../app');
+const debug = require('debug')('cafe-quintal:server');
+const http = require('http');
+
+/**
+ * Get port from environment and store in Express.
+ */
+
+const port = normalizePort(process.env.PORT || '3000');
+app.set('port', port);
+
+/**
+ * Create HTTP server.
+ */
+
+const server = http.createServer(app);
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+server.listen(port);
+server.on('error', onError);
+server.on('listening', onListening);
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+  const port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  const bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  const addr = server.address();
+  const bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}
+
+
+--- File: models/users.js ---
+const mongoose = require('mongoose');
+const bcryptjs = require('bcryptjs');
+
+const UserSchema = new mongoose.Schema({
+    username: {
+        type: String,
+        required: true,
+        unique: true
+    },
+    password: {
+        type: String,
+        required: true
+    },
+    role: {
+        type: String,
+        enum: ['user', 'admin'],
+        default: 'user'
+    }
+});
+
+// Hash the password before saving the user model
+UserSchema.pre('save', function(next) {
+    const user = this;
+
+    if (!user.isModified('password')) return next();
+
+    bcryptjs.genSalt(10, function(err, salt) {
+        if (err) return next(err);
+
+        bcryptjs.hash(user.password, salt, function(err, hash) {
+            if (err) return next(err);
+
+            user.password = hash;
+            next();
+        });
+    });
+});
+
+UserSchema.methods.comparePassword = function(candidatePassword, callback) {
+    bcryptjs.compare(candidatePassword, this.password, function(err, isMatch) {
+        if (err) return callback(err);
+        callback(null, isMatch);
+    });
+};
+
+module.exports = mongoose.model('User', UserSchema);
+
+
+--- File: package-lock.json ---
+{
+  "name": "cafe-quintal",
+  "version": "0.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "cafe-quintal",
+      "version": "0.0.0",
+      "dependencies": {
+        "bcryptjs": "^2.4.3",
+        "cookie-parser": "~1.4.4",
+        "debug": "~2.6.9",
+        "express": "^4.18.2",
+        "hbs": "^4.2.0",
+        "http-errors": "~1.6.3",
+        "morgan": "~1.9.1"
+      }
+    },
+    "node_modules/accepts": {
+      "version": "1.3.8",
+      "resolved": "https://registry.npmjs.org/accepts/-/accepts-1.3.8.tgz",
+      "integrity": "sha512-PYAthTa2m2VKxuvSD3DPC/Gy+U+sOA1LAuT8mkmRuvw+NACSaeXEQ+NHcVF7rONl6qcaxV3Uuemwawk+7+SJLw==",
+      "dependencies": {
+        "mime-types": "~2.1.34",
+        "negotiator": "0.6.3"
+      },
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/array-flatten": {
+      "version": "1.1.1",
+      "resolved": "https://registry.npmjs.org/array-flatten/-/array-flatten-1.1.1.tgz",
+      "integrity": "sha512-PCVAQswWemu6UdxsDFFX/+gVeYqKAod3D3UVm91jHwynguOwAvYPhx8nNlM++NqRcK6CxxpUafjmhIdKiHibqg=="
+    },
+    "node_modules/basic-auth": {
+      "version": "2.0.1",
+      "resolved": "https://registry.npmjs.org/basic-auth/-/basic-auth-2.0.1.tgz",
+      "integrity": "sha512-NF+epuEdnUYVlGuhaxbbq+dvJttwLnGY+YixlXlME5KpQ5W3CnXA5cVTneY3SPbPDRkcjMbifrwmFYcClgOZeg==",
+      "dependencies": {
+        "safe-buffer": "5.1.2"
+      },
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/bcryptjs": {
+      "version": "2.4.3",
+      "resolved": "https://registry.npmjs.org/bcryptjs/-/bcryptjs-2.4.3.tgz",
+      "integrity": "sha512-V/Hy/X9Vt7f3BbPJEi8BdVFMByHi+jNXrYkW3huaybV/kQ0KJg0Y6PkEMbn+zeT+i+SiKZ/HMqJGIIt4LZDqNQ=="
+    },
+    "node_modules/body-parser": {
+      "version": "1.20.1",
+      "resolved": "https://registry.npmjs.org/body-parser/-/body-parser-1.20.1.tgz",
+      "integrity": "sha512-jWi7abTbYwajOytWCQc37VulmWiRae5RyTpaCyDcS5/lMdtwSz5lOpDE67srw/HYe35f1z3fDQw+3txg7gNtWw==",
+      "dependencies": {
+        "bytes": "3.1.2",
+        "content-type": "~1.0.4",
+        "debug": "2.6.9",
+        "depd": "2.0.0",
+        "destroy": "1.2.0",
+        "http-errors": "2.0.0",
+        "iconv-lite": "0.4.24",
+        "on-finished": "2.4.1",
+        "qs": "6.11.0",
+        "raw-body": "2.5.1",
+        "type-is": "~1.6.18",
+        "unpipe": "1.0.0"
+      },
+      "engines": {
+        "node": ">= 0.8",
+        "npm": "1.2.8000 || >= 1.4.16"
+      }
+    },
+    "node_modules/body-parser/node_modules/depd": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/depd/-/depd-2.0.0.tgz",
+      "integrity": "sha512-g7nH6P6dyDioJogAAGprGpCtVImJhpPk/roCzdb3fIh61/s/nPsfR6onyMwkCAR/OlC3yBC0lESvUoQEAssIrw==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/body-parser/node_modules/http-errors": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/http-errors/-/http-errors-2.0.0.tgz",
+      "integrity": "sha512-FtwrG/euBzaEjYeRqOgly7G0qviiXoJWnvEH2Z1plBdXgbyjv34pHTSb9zoeHMyDy33+DWy5Wt9Wo+TURtOYSQ==",
+      "dependencies": {
+        "depd": "2.0.0",
+        "inherits": "2.0.4",
+        "setprototypeof": "1.2.0",
+        "statuses": "2.0.1",
+        "toidentifier": "1.0.1"
+      },
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/body-parser/node_modules/inherits": {
+      "version": "2.0.4",
+      "resolved": "https://registry.npmjs.org/inherits/-/inherits-2.0.4.tgz",
+      "integrity": "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ=="
+    },
+    "node_modules/body-parser/node_modules/on-finished": {
+      "version": "2.4.1",
+      "resolved": "https://registry.npmjs.org/on-finished/-/on-finished-2.4.1.tgz",
+      "integrity": "sha512-oVlzkg3ENAhCk2zdv7IJwd/QUD4z2RxRwpkcGY8psCVcCYZNq4wYnVWALHM+brtuJjePWiYF/ClmuDr8Ch5+kg==",
+      "dependencies": {
+        "ee-first": "1.1.1"
+      },
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/body-parser/node_modules/setprototypeof": {
+      "version": "1.2.0",
+      "resolved": "https://registry.npmjs.org/setprototypeof/-/setprototypeof-1.2.0.tgz",
+      "integrity": "sha512-E5LDX7Wrp85Kil5bhZv46j8jOeboKq5JMmYM3gVGdGH8xFpPWXUMsNrlODCrkoxMEeNi/XZIwuRvY4XNwYMJpw=="
+    },
+    "node_modules/body-parser/node_modules/statuses": {
+      "version": "2.0.1",
+      "resolved": "https://registry.npmjs.org/statuses/-/statuses-2.0.1.tgz",
+      "integrity": "sha512-RwNA9Z/7PrK06rYLIzFMlaF+l73iwpzsqRIFgbMLbTcLD6cOao82TaWefPXQvB2fOC4AjuYSEndS7N/mTCbkdQ==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/bytes": {
+      "version": "3.1.2",
+      "resolved": "https://registry.npmjs.org/bytes/-/bytes-3.1.2.tgz",
+      "integrity": "sha512-/Nf7TyzTx6S3yRJObOAV7956r8cr2+Oj8AC5dt8wSP3BQAoeX58NoHyCU8P8zGkNXStjTSi6fzO6F0pBdcYbEg==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/call-bind": {
+      "version": "1.0.2",
+      "resolved": "https://registry.npmjs.org/call-bind/-/call-bind-1.0.2.tgz",
+      "integrity": "sha512-7O+FbCihrB5WGbFYesctwmTKae6rOiIzmz1icreWJ+0aA7LJfuqhEso2T9ncpcFtzMQtzXf2QGGueWJGTYsqrA==",
+      "dependencies": {
+        "function-bind": "^1.1.1",
+        "get-intrinsic": "^1.0.2"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/content-disposition": {
+      "version": "0.5.4",
+      "resolved": "https://registry.npmjs.org/content-disposition/-/content-disposition-0.5.4.tgz",
+      "integrity": "sha512-FveZTNuGw04cxlAiWbzi6zTAL/lhehaWbTtgluJh4/E95DqMwTmha3KZN1aAWA8cFIhHzMZUvLevkw5Rqk+tSQ==",
+      "dependencies": {
+        "safe-buffer": "5.2.1"
+      },
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/content-disposition/node_modules/safe-buffer": {
+      "version": "5.2.1",
+      "resolved": "https://registry.npmjs.org/safe-buffer/-/safe-buffer-5.2.1.tgz",
+      "integrity": "sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ==",
+      "funding": [
+        {
+          "type": "github",
+          "url": "https://github.com/sponsors/feross"
+        },
+        {
+          "type": "patreon",
+          "url": "https://www.patreon.com/feross"
+        },
+        {
+          "type": "consulting",
+          "url": "https://feross.org/support"
+        }
+      ]
+    },
+    "node_modules/content-type": {
+      "version": "1.0.5",
+      "resolved": "https://registry.npmjs.org/content-type/-/content-type-1.0.5.tgz",
+      "integrity": "sha512-nTjqfcBFEipKdXCv4YDQWCfmcLZKm81ldF0pAopTvyrFGVbcR6P/VAAd5G7N+0tTr8QqiU0tFadD6FK4NtJwOA==",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/cookie": {
+      "version": "0.4.1",
+      "resolved": "https://registry.npmjs.org/cookie/-/cookie-0.4.1.tgz",
+      "integrity": "sha512-ZwrFkGJxUR3EIoXtO+yVE69Eb7KlixbaeAWfBQB9vVsNn/o+Yw69gBWSSDK825hQNdN+wF8zELf3dFNl/kxkUA==",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/cookie-parser": {
+      "version": "1.4.6",
+      "resolved": "https://registry.npmjs.org/cookie-parser/-/cookie-parser-1.4.6.tgz",
+      "integrity": "sha512-z3IzaNjdwUC2olLIB5/ITd0/setiaFMLYiZJle7xg5Fe9KWAceil7xszYfHHBtDFYLSgJduS2Ty0P1uJdPDJeA==",
+      "dependencies": {
+        "cookie": "0.4.1",
+        "cookie-signature": "1.0.6"
+      },
+      "engines": {
+        "node": ">= 0.8.0"
+      }
+    },
+    "node_modules/cookie-signature": {
+      "version": "1.0.6",
+      "resolved": "https://registry.npmjs.org/cookie-signature/-/cookie-signature-1.0.6.tgz",
+      "integrity": "sha512-QADzlaHc8icV8I7vbaJXJwod9HWYp8uCqf1xa4OfNu1T7JVxQIrUgOWtHdNDtPiywmFbiS12VjotIXLrKM3orQ=="
+    },
+    "node_modules/debug": {
+      "version": "2.6.9",
+      "resolved": "https://registry.npmjs.org/debug/-/debug-2.6.9.tgz",
+      "integrity": "sha512-bC7ElrdJaJnPbAP+1EotYvqZsb3ecl5wi6Bfi6BJTUcNowp6cvspg0jXznRTKDjm/E7AdgFBVeAPVMNcKGsHMA==",
+      "dependencies": {
+        "ms": "2.0.0"
+      }
+    },
+    "node_modules/depd": {
+      "version": "1.1.2",
+      "resolved": "https://registry.npmjs.org/depd/-/depd-1.1.2.tgz",
+      "integrity": "sha512-7emPTl6Dpo6JRXOXjLRxck+FlLRX5847cLKEn00PLAgc3g2hTZZgr+e4c2v6QpSmLeFP3n5yUo7ft6avBK/5jQ==",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/destroy": {
+      "version": "1.2.0",
+      "resolved": "https://registry.npmjs.org/destroy/-/destroy-1.2.0.tgz",
+      "integrity": "sha512-2sJGJTaXIIaR1w4iJSNoN0hnMY7Gpc/n8D4qSCJw8QqFWXf7cuAgnEHxBpweaVcPevC2l3KpjYCx3NypQQgaJg==",
+      "engines": {
+        "node": ">= 0.8",
+        "npm": "1.2.8000 || >= 1.4.16"
+      }
+    },
+    "node_modules/ee-first": {
+      "version": "1.1.1",
+      "resolved": "https://registry.npmjs.org/ee-first/-/ee-first-1.1.1.tgz",
+      "integrity": "sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow=="
+    },
+    "node_modules/encodeurl": {
+      "version": "1.0.2",
+      "resolved": "https://registry.npmjs.org/encodeurl/-/encodeurl-1.0.2.tgz",
+      "integrity": "sha512-TPJXq8JqFaVYm2CWmPvnP2Iyo4ZSM7/QKcSmuMLDObfpH5fi7RUGmd/rTDf+rut/saiDiQEeVTNgAmJEdAOx0w==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/escape-html": {
+      "version": "1.0.3",
+      "resolved": "https://registry.npmjs.org/escape-html/-/escape-html-1.0.3.tgz",
+      "integrity": "sha512-NiSupZ4OeuGwr68lGIeym/ksIZMJodUGOSCZ/FSnTxcrekbvqrgdUxlJOMpijaKZVjAJrWrGs/6Jy8OMuyj9ow=="
+    },
+    "node_modules/etag": {
+      "version": "1.8.1",
+      "resolved": "https://registry.npmjs.org/etag/-/etag-1.8.1.tgz",
+      "integrity": "sha512-aIL5Fx7mawVa300al2BnEE4iNvo1qETxLrPI/o05L7z6go7fCw1J6EQmbK4FmJ2AS7kgVF/KEZWufBfdClMcPg==",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/express": {
+      "version": "4.18.2",
+      "resolved": "https://registry.npmjs.org/express/-/express-4.18.2.tgz",
+      "integrity": "sha512-5/PsL6iGPdfQ/lKM1UuielYgv3BUoJfz1aUwU9vHZ+J7gyvwdQXFEBIEIaxeGf0GIcreATNyBExtalisDbuMqQ==",
+      "dependencies": {
+        "accepts": "~1.3.8",
+        "array-flatten": "1.1.1",
+        "body-parser": "1.20.1",
+        "content-disposition": "0.5.4",
+        "content-type": "~1.0.4",
+        "cookie": "0.5.0",
+        "cookie-signature": "1.0.6",
+        "debug": "2.6.9",
+        "depd": "2.0.0",
+        "encodeurl": "~1.0.2",
+        "escape-html": "~1.0.3",
+        "etag": "~1.8.1",
+        "finalhandler": "1.2.0",
+        "fresh": "0.5.2",
+        "http-errors": "2.0.0",
+        "merge-descriptors": "1.0.1",
+        "methods": "~1.1.2",
+        "on-finished": "2.4.1",
+        "parseurl": "~1.3.3",
+        "path-to-regexp": "0.1.7",
+        "proxy-addr": "~2.0.7",
+        "qs": "6.11.0",
+        "range-parser": "~1.2.1",
+        "safe-buffer": "5.2.1",
+        "send": "0.18.0",
+        "serve-static": "1.15.0",
+        "setprototypeof": "1.2.0",
+        "statuses": "2.0.1",
+        "type-is": "~1.6.18",
+        "utils-merge": "1.0.1",
+        "vary": "~1.1.2"
+      },
+      "engines": {
+        "node": ">= 0.10.0"
+      }
+    },
+    "node_modules/express/node_modules/cookie": {
+      "version": "0.5.0",
+      "resolved": "https://registry.npmjs.org/cookie/-/cookie-0.5.0.tgz",
+      "integrity": "sha512-YZ3GUyn/o8gfKJlnlX7g7xq4gyO6OSuhGPKaaGssGB2qgDUS0gPgtTvoyZLTt9Ab6dC4hfc9dV5arkvc/OCmrw==",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/express/node_modules/depd": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/depd/-/depd-2.0.0.tgz",
+      "integrity": "sha512-g7nH6P6dyDioJogAAGprGpCtVImJhpPk/roCzdb3fIh61/s/nPsfR6onyMwkCAR/OlC3yBC0lESvUoQEAssIrw==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/express/node_modules/http-errors": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/http-errors/-/http-errors-2.0.0.tgz",
+      "integrity": "sha512-FtwrG/euBzaEjYeRqOgly7G0qviiXoJWnvEH2Z1plBdXgbyjv34pHTSb9zoeHMyDy33+DWy5Wt9Wo+TURtOYSQ==",
+      "dependencies": {
+        "depd": "2.0.0",
+        "inherits": "2.0.4",
+        "setprototypeof": "1.2.0",
+        "statuses": "2.0.1",
+        "toidentifier": "1.0.1"
+      },
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/express/node_modules/inherits": {
+      "version": "2.0.4",
+      "resolved": "https://registry.npmjs.org/inherits/-/inherits-2.0.4.tgz",
+      "integrity": "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ=="
+    },
+    "node_modules/express/node_modules/on-finished": {
+      "version": "2.4.1",
+      "resolved": "https://registry.npmjs.org/on-finished/-/on-finished-2.4.1.tgz",
+      "integrity": "sha512-oVlzkg3ENAhCk2zdv7IJwd/QUD4z2RxRwpkcGY8psCVcCYZNq4wYnVWALHM+brtuJjePWiYF/ClmuDr8Ch5+kg==",
+      "dependencies": {
+        "ee-first": "1.1.1"
+      },
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/express/node_modules/safe-buffer": {
+      "version": "5.2.1",
+      "resolved": "https://registry.npmjs.org/safe-buffer/-/safe-buffer-5.2.1.tgz",
+      "integrity": "sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ==",
+      "funding": [
+        {
+          "type": "github",
+          "url": "https://github.com/sponsors/feross"
+        },
+        {
+          "type": "patreon",
+          "url": "https://www.patreon.com/feross"
+        },
+        {
+          "type": "consulting",
+          "url": "https://feross.org/support"
+        }
+      ]
+    },
+    "node_modules/express/node_modules/setprototypeof": {
+      "version": "1.2.0",
+      "resolved": "https://registry.npmjs.org/setprototypeof/-/setprototypeof-1.2.0.tgz",
+      "integrity": "sha512-E5LDX7Wrp85Kil5bhZv46j8jOeboKq5JMmYM3gVGdGH8xFpPWXUMsNrlODCrkoxMEeNi/XZIwuRvY4XNwYMJpw=="
+    },
+    "node_modules/express/node_modules/statuses": {
+      "version": "2.0.1",
+      "resolved": "https://registry.npmjs.org/statuses/-/statuses-2.0.1.tgz",
+      "integrity": "sha512-RwNA9Z/7PrK06rYLIzFMlaF+l73iwpzsqRIFgbMLbTcLD6cOao82TaWefPXQvB2fOC4AjuYSEndS7N/mTCbkdQ==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/finalhandler": {
+      "version": "1.2.0",
+      "resolved": "https://registry.npmjs.org/finalhandler/-/finalhandler-1.2.0.tgz",
+      "integrity": "sha512-5uXcUVftlQMFnWC9qu/svkWv3GTd2PfUhK/3PLkYNAe7FbqJMt3515HaxE6eRL74GdsriiwujiawdaB1BpEISg==",
+      "dependencies": {
+        "debug": "2.6.9",
+        "encodeurl": "~1.0.2",
+        "escape-html": "~1.0.3",
+        "on-finished": "2.4.1",
+        "parseurl": "~1.3.3",
+        "statuses": "2.0.1",
+        "unpipe": "~1.0.0"
+      },
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/finalhandler/node_modules/on-finished": {
+      "version": "2.4.1",
+      "resolved": "https://registry.npmjs.org/on-finished/-/on-finished-2.4.1.tgz",
+      "integrity": "sha512-oVlzkg3ENAhCk2zdv7IJwd/QUD4z2RxRwpkcGY8psCVcCYZNq4wYnVWALHM+brtuJjePWiYF/ClmuDr8Ch5+kg==",
+      "dependencies": {
+        "ee-first": "1.1.1"
+      },
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/finalhandler/node_modules/statuses": {
+      "version": "2.0.1",
+      "resolved": "https://registry.npmjs.org/statuses/-/statuses-2.0.1.tgz",
+      "integrity": "sha512-RwNA9Z/7PrK06rYLIzFMlaF+l73iwpzsqRIFgbMLbTcLD6cOao82TaWefPXQvB2fOC4AjuYSEndS7N/mTCbkdQ==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/foreachasync": {
+      "version": "3.0.0",
+      "resolved": "https://registry.npmjs.org/foreachasync/-/foreachasync-3.0.0.tgz",
+      "integrity": "sha512-J+ler7Ta54FwwNcx6wQRDhTIbNeyDcARMkOcguEqnEdtm0jKvN3Li3PDAb2Du3ubJYEWfYL83XMROXdsXAXycw=="
+    },
+    "node_modules/forwarded": {
+      "version": "0.2.0",
+      "resolved": "https://registry.npmjs.org/forwarded/-/forwarded-0.2.0.tgz",
+      "integrity": "sha512-buRG0fpBtRHSTCOASe6hD258tEubFoRLb4ZNA6NxMVHNw2gOcwHo9wyablzMzOA5z9xA9L1KNjk/Nt6MT9aYow==",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/fresh": {
+      "version": "0.5.2",
+      "resolved": "https://registry.npmjs.org/fresh/-/fresh-0.5.2.tgz",
+      "integrity": "sha512-zJ2mQYM18rEFOudeV4GShTGIQ7RbzA7ozbU9I/XBpm7kqgMywgmylMwXHxZJmkVoYkna9d2pVXVXPdYTP9ej8Q==",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/function-bind": {
+      "version": "1.1.1",
+      "resolved": "https://registry.npmjs.org/function-bind/-/function-bind-1.1.1.tgz",
+      "integrity": "sha512-yIovAzMX49sF8Yl58fSCWJ5svSLuaibPxXQJFLmBObTuCr0Mf1KiPopGM9NiFjiYBCbfaa2Fh6breQ6ANVTI0A=="
+    },
+    "node_modules/get-intrinsic": {
+      "version": "1.2.1",
+      "resolved": "https://registry.npmjs.org/get-intrinsic/-/get-intrinsic-1.2.1.tgz",
+      "integrity": "sha512-2DcsyfABl+gVHEfCOaTrWgyt+tb6MSEGmKq+kI5HwLbIYgjgmMcV8KQ41uaKz1xxUcn9tJtgFbQUEVcEbd0FYw==",
+      "dependencies": {
+        "function-bind": "^1.1.1",
+        "has": "^1.0.3",
+        "has-proto": "^1.0.1",
+        "has-symbols": "^1.0.3"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/handlebars": {
+      "version": "4.7.7",
+      "resolved": "https://registry.npmjs.org/handlebars/-/handlebars-4.7.7.tgz",
+      "integrity": "sha512-aAcXm5OAfE/8IXkcZvCepKU3VzW1/39Fb5ZuqMtgI/hT8X2YgoMvBY5dLhq/cpOvw7Lk1nK/UF71aLG/ZnVYRA==",
+      "dependencies": {
+        "minimist": "^1.2.5",
+        "neo-async": "^2.6.0",
+        "source-map": "^0.6.1",
+        "wordwrap": "^1.0.0"
+      },
+      "bin": {
+        "handlebars": "bin/handlebars"
+      },
+      "engines": {
+        "node": ">=0.4.7"
+      },
+      "optionalDependencies": {
+        "uglify-js": "^3.1.4"
+      }
+    },
+    "node_modules/has": {
+      "version": "1.0.3",
+      "resolved": "https://registry.npmjs.org/has/-/has-1.0.3.tgz",
+      "integrity": "sha512-f2dvO0VU6Oej7RkWJGrehjbzMAjFp5/VKPp5tTpWIV4JHHZK1/BxbFRtf/siA2SWTe09caDmVtYYzWEIbBS4zw==",
+      "dependencies": {
+        "function-bind": "^1.1.1"
+      },
+      "engines": {
+        "node": ">= 0.4.0"
+      }
+    },
+    "node_modules/has-proto": {
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/has-proto/-/has-proto-1.0.1.tgz",
+      "integrity": "sha512-7qE+iP+O+bgF9clE5+UoBFzE65mlBiVj3tKCrlNQ0Ogwm0BjpT/gK4SlLYDMybDh5I3TCTKnPPa0oMG7JDYrhg==",
+      "engines": {
+        "node": ">= 0.4"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/has-symbols": {
+      "version": "1.0.3",
+      "resolved": "https://registry.npmjs.org/has-symbols/-/has-symbols-1.0.3.tgz",
+      "integrity": "sha512-l3LCuF6MgDNwTDKkdYGEihYjt5pRPbEg46rtlmnSPlUbgmB8LOIrKJbYYFBSbnPaJexMKtiPO8hmeRjRz2Td+A==",
+      "engines": {
+        "node": ">= 0.4"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/hbs": {
+      "version": "4.2.0",
+      "resolved": "https://registry.npmjs.org/hbs/-/hbs-4.2.0.tgz",
+      "integrity": "sha512-dQwHnrfWlTk5PvG9+a45GYpg0VpX47ryKF8dULVd6DtwOE6TEcYQXQ5QM6nyOx/h7v3bvEQbdn19EDAcfUAgZg==",
+      "dependencies": {
+        "handlebars": "4.7.7",
+        "walk": "2.3.15"
+      },
+      "engines": {
+        "node": ">= 0.8",
+        "npm": "1.2.8000 || >= 1.4.16"
+      }
+    },
+    "node_modules/http-errors": {
+      "version": "1.6.3",
+      "resolved": "https://registry.npmjs.org/http-errors/-/http-errors-1.6.3.tgz",
+      "integrity": "sha512-lks+lVC8dgGyh97jxvxeYTWQFvh4uw4yC12gVl63Cg30sjPX4wuGcdkICVXDAESr6OJGjqGA8Iz5mkeN6zlD7A==",
+      "dependencies": {
+        "depd": "~1.1.2",
+        "inherits": "2.0.3",
+        "setprototypeof": "1.1.0",
+        "statuses": ">= 1.4.0 < 2"
+      },
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/iconv-lite": {
+      "version": "0.4.24",
+      "resolved": "https://registry.npmjs.org/iconv-lite/-/iconv-lite-0.4.24.tgz",
+      "integrity": "sha512-v3MXnZAcvnywkTUEZomIActle7RXXeedOR31wwl7VlyoXO4Qi9arvSenNQWne1TcRwhCL1HwLI21bEqdpj8/rA==",
+      "dependencies": {
+        "safer-buffer": ">= 2.1.2 < 3"
+      },
+      "engines": {
+        "node": ">=0.10.0"
+      }
+    },
+    "node_modules/inherits": {
+      "version": "2.0.3",
+      "resolved": "https://registry.npmjs.org/inherits/-/inherits-2.0.3.tgz",
+      "integrity": "sha512-x00IRNXNy63jwGkJmzPigoySHbaqpNuzKbBOmzK+g2OdZpQ9w+sxCN+VSB3ja7IAge2OP2qpfxTjeNcyjmW1uw=="
+    },
+    "node_modules/ipaddr.js": {
+      "version": "1.9.1",
+      "resolved": "https://registry.npmjs.org/ipaddr.js/-/ipaddr.js-1.9.1.tgz",
+      "integrity": "sha512-0KI/607xoxSToH7GjN1FfSbLoU0+btTicjsQSWQlh/hZykN8KpmMf7uYwPW3R+akZ6R/w18ZlXSHBYXiYUPO3g==",
+      "engines": {
+        "node": ">= 0.10"
+      }
+    },
+    "node_modules/media-typer": {
+      "version": "0.3.0",
+      "resolved": "https://registry.npmjs.org/media-typer/-/media-typer-0.3.0.tgz",
+      "integrity": "sha512-dq+qelQ9akHpcOl/gUVRTxVIOkAJ1wR3QAvb4RsVjS8oVoFjDGTc679wJYmUmknUF5HwMLOgb5O+a3KxfWapPQ==",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/merge-descriptors": {
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/merge-descriptors/-/merge-descriptors-1.0.1.tgz",
+      "integrity": "sha512-cCi6g3/Zr1iqQi6ySbseM1Xvooa98N0w31jzUYrXPX2xqObmFGHJ0tQ5u74H3mVh7wLouTseZyYIq39g8cNp1w=="
+    },
+    "node_modules/methods": {
+      "version": "1.1.2",
+      "resolved": "https://registry.npmjs.org/methods/-/methods-1.1.2.tgz",
+      "integrity": "sha512-iclAHeNqNm68zFtnZ0e+1L2yUIdvzNoauKU4WBA3VvH/vPFieF7qfRlwUZU+DA9P9bPXIS90ulxoUoCH23sV2w==",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/mime": {
+      "version": "1.6.0",
+      "resolved": "https://registry.npmjs.org/mime/-/mime-1.6.0.tgz",
+      "integrity": "sha512-x0Vn8spI+wuJ1O6S7gnbaQg8Pxh4NNHb7KSINmEWKiPE4RKOplvijn+NkmYmmRgP68mc70j2EbeTFRsrswaQeg==",
+      "bin": {
+        "mime": "cli.js"
+      },
+      "engines": {
+        "node": ">=4"
+      }
+    },
+    "node_modules/mime-db": {
+      "version": "1.52.0",
+      "resolved": "https://registry.npmjs.org/mime-db/-/mime-db-1.52.0.tgz",
+      "integrity": "sha512-sPU4uV7dYlvtWJxwwxHD0PuihVNiE7TyAbQ5SWxDCB9mUYvOgroQOwYQQOKPJ8CIbE+1ETVlOoK1UC2nU3gYvg==",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/mime-types": {
+      "version": "2.1.35",
+      "resolved": "https://registry.npmjs.org/mime-types/-/mime-types-2.1.35.tgz",
+      "integrity": "sha512-ZDY+bPm5zTTF+YpCrAU9nK0UgICYPT0QtT1NZWFv4s++TNkcgVaT0g6+4R2uI4MjQjzysHB1zxuWL50hzaeXiw==",
+      "dependencies": {
+        "mime-db": "1.52.0"
+      },
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/minimist": {
+      "version": "1.2.8",
+      "resolved": "https://registry.npmjs.org/minimist/-/minimist-1.2.8.tgz",
+      "integrity": "sha512-2yyAR8qBkN3YuheJanUpWC5U3bb5osDywNB8RzDVlDwDHbocAJveqqj1u8+SVD7jkWT4yvsHCpWqqWqAxb0zCA==",
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/morgan": {
+      "version": "1.9.1",
+      "resolved": "https://registry.npmjs.org/morgan/-/morgan-1.9.1.tgz",
+      "integrity": "sha512-HQStPIV4y3afTiCYVxirakhlCfGkI161c76kKFca7Fk1JusM//Qeo1ej2XaMniiNeaZklMVrh3vTtIzpzwbpmA==",
+      "dependencies": {
+        "basic-auth": "~2.0.0",
+        "debug": "2.6.9",
+        "depd": "~1.1.2",
+        "on-finished": "~2.3.0",
+        "on-headers": "~1.0.1"
+      },
+      "engines": {
+        "node": ">= 0.8.0"
+      }
+    },
+    "node_modules/ms": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/ms/-/ms-2.0.0.tgz",
+      "integrity": "sha512-Tpp60P6IUJDTuOq/5Z8cdskzJujfwqfOTkrwIwj7IRISpnkJnT6SyJ4PCPnGMoFjC9ddhal5KVIYtAt97ix05A=="
+    },
+    "node_modules/negotiator": {
+      "version": "0.6.3",
+      "resolved": "https://registry.npmjs.org/negotiator/-/negotiator-0.6.3.tgz",
+      "integrity": "sha512-+EUsqGPLsM+j/zdChZjsnX51g4XrHFOIXwfnCVPGlQk/k5giakcKsuxCObBRu6DSm9opw/O6slWbJdghQM4bBg==",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/neo-async": {
+      "version": "2.6.2",
+      "resolved": "https://registry.npmjs.org/neo-async/-/neo-async-2.6.2.tgz",
+      "integrity": "sha512-Yd3UES5mWCSqR+qNT93S3UoYUkqAZ9lLg8a7g9rimsWmYGK8cVToA4/sF3RrshdyV3sAGMXVUmpMYOw+dLpOuw=="
+    },
+    "node_modules/object-inspect": {
+      "version": "1.12.3",
+      "resolved": "https://registry.npmjs.org/object-inspect/-/object-inspect-1.12.3.tgz",
+      "integrity": "sha512-geUvdk7c+eizMNUDkRpW1wJwgfOiOeHbxBR/hLXK1aT6zmVSO0jsQcs7fj6MGw89jC/cjGfLcNOrtMYtGqm81g==",
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/on-finished": {
+      "version": "2.3.0",
+      "resolved": "https://registry.npmjs.org/on-finished/-/on-finished-2.3.0.tgz",
+      "integrity": "sha512-ikqdkGAAyf/X/gPhXGvfgAytDZtDbr+bkNUJ0N9h5MI/dmdgCs3l6hoHrcUv41sRKew3jIwrp4qQDXiK99Utww==",
+      "dependencies": {
+        "ee-first": "1.1.1"
+      },
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/on-headers": {
+      "version": "1.0.2",
+      "resolved": "https://registry.npmjs.org/on-headers/-/on-headers-1.0.2.tgz",
+      "integrity": "sha512-pZAE+FJLoyITytdqK0U5s+FIpjN0JP3OzFi/u8Rx+EV5/W+JTWGXG8xFzevE7AjBfDqHv/8vL8qQsIhHnqRkrA==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/parseurl": {
+      "version": "1.3.3",
+      "resolved": "https://registry.npmjs.org/parseurl/-/parseurl-1.3.3.tgz",
+      "integrity": "sha512-CiyeOxFT/JZyN5m0z9PfXw4SCBJ6Sygz1Dpl0wqjlhDEGGBP1GnsUVEL0p63hoG1fcj3fHynXi9NYO4nWOL+qQ==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/path-to-regexp": {
+      "version": "0.1.7",
+      "resolved": "https://registry.npmjs.org/path-to-regexp/-/path-to-regexp-0.1.7.tgz",
+      "integrity": "sha512-5DFkuoqlv1uYQKxy8omFBeJPQcdoE07Kv2sferDCrAq1ohOU+MSDswDIbnx3YAM60qIOnYa53wBhXW0EbMonrQ=="
+    },
+    "node_modules/proxy-addr": {
+      "version": "2.0.7",
+      "resolved": "https://registry.npmjs.org/proxy-addr/-/proxy-addr-2.0.7.tgz",
+      "integrity": "sha512-llQsMLSUDUPT44jdrU/O37qlnifitDP+ZwrmmZcoSKyLKvtZxpyV0n2/bD/N4tBAAZ/gJEdZU7KMraoK1+XYAg==",
+      "dependencies": {
+        "forwarded": "0.2.0",
+        "ipaddr.js": "1.9.1"
+      },
+      "engines": {
+        "node": ">= 0.10"
+      }
+    },
+    "node_modules/qs": {
+      "version": "6.11.0",
+      "resolved": "https://registry.npmjs.org/qs/-/qs-6.11.0.tgz",
+      "integrity": "sha512-MvjoMCJwEarSbUYk5O+nmoSzSutSsTwF85zcHPQ9OrlFoZOYIjaqBAJIqIXjptyD5vThxGq52Xu/MaJzRkIk4Q==",
+      "dependencies": {
+        "side-channel": "^1.0.4"
+      },
+      "engines": {
+        "node": ">=0.6"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/range-parser": {
+      "version": "1.2.1",
+      "resolved": "https://registry.npmjs.org/range-parser/-/range-parser-1.2.1.tgz",
+      "integrity": "sha512-Hrgsx+orqoygnmhFbKaHE6c296J+HTAQXoxEF6gNupROmmGJRoyzfG3ccAveqCBrwr/2yxQ5BVd/GTl5agOwSg==",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/raw-body": {
+      "version": "2.5.1",
+      "resolved": "https://registry.npmjs.org/raw-body/-/raw-body-2.5.1.tgz",
+      "integrity": "sha512-qqJBtEyVgS0ZmPGdCFPWJ3FreoqvG4MVQln/kCgF7Olq95IbOp0/BWyMwbdtn4VTvkM8Y7khCQ2Xgk/tcrCXig==",
+      "dependencies": {
+        "bytes": "3.1.2",
+        "http-errors": "2.0.0",
+        "iconv-lite": "0.4.24",
+        "unpipe": "1.0.0"
+      },
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/raw-body/node_modules/depd": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/depd/-/depd-2.0.0.tgz",
+      "integrity": "sha512-g7nH6P6dyDioJogAAGprGpCtVImJhpPk/roCzdb3fIh61/s/nPsfR6onyMwkCAR/OlC3yBC0lESvUoQEAssIrw==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/raw-body/node_modules/http-errors": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/http-errors/-/http-errors-2.0.0.tgz",
+      "integrity": "sha512-FtwrG/euBzaEjYeRqOgly7G0qviiXoJWnvEH2Z1plBdXgbyjv34pHTSb9zoeHMyDy33+DWy5Wt9Wo+TURtOYSQ==",
+      "dependencies": {
+        "depd": "2.0.0",
+        "inherits": "2.0.4",
+        "setprototypeof": "1.2.0",
+        "statuses": "2.0.1",
+        "toidentifier": "1.0.1"
+      },
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/raw-body/node_modules/inherits": {
+      "version": "2.0.4",
+      "resolved": "https://registry.npmjs.org/inherits/-/inherits-2.0.4.tgz",
+      "integrity": "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ=="
+    },
+    "node_modules/raw-body/node_modules/setprototypeof": {
+      "version": "1.2.0",
+      "resolved": "https://registry.npmjs.org/setprototypeof/-/setprototypeof-1.2.0.tgz",
+      "integrity": "sha512-E5LDX7Wrp85Kil5bhZv46j8jOeboKq5JMmYM3gVGdGH8xFpPWXUMsNrlODCrkoxMEeNi/XZIwuRvY4XNwYMJpw=="
+    },
+    "node_modules/raw-body/node_modules/statuses": {
+      "version": "2.0.1",
+      "resolved": "https://registry.npmjs.org/statuses/-/statuses-2.0.1.tgz",
+      "integrity": "sha512-RwNA9Z/7PrK06rYLIzFMlaF+l73iwpzsqRIFgbMLbTcLD6cOao82TaWefPXQvB2fOC4AjuYSEndS7N/mTCbkdQ==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/safe-buffer": {
+      "version": "5.1.2",
+      "resolved": "https://registry.npmjs.org/safe-buffer/-/safe-buffer-5.1.2.tgz",
+      "integrity": "sha512-Gd2UZBJDkXlY7GbJxfsE8/nvKkUEU1G38c1siN6QP6a9PT9MmHB8GnpscSmMJSoF8LOIrt8ud/wPtojys4G6+g=="
+    },
+    "node_modules/safer-buffer": {
+      "version": "2.1.2",
+      "resolved": "https://registry.npmjs.org/safer-buffer/-/safer-buffer-2.1.2.tgz",
+      "integrity": "sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg=="
+    },
+    "node_modules/send": {
+      "version": "0.18.0",
+      "resolved": "https://registry.npmjs.org/send/-/send-0.18.0.tgz",
+      "integrity": "sha512-qqWzuOjSFOuqPjFe4NOsMLafToQQwBSOEpS+FwEt3A2V3vKubTquT3vmLTQpFgMXp8AlFWFuP1qKaJZOtPpVXg==",
+      "dependencies": {
+        "debug": "2.6.9",
+        "depd": "2.0.0",
+        "destroy": "1.2.0",
+        "encodeurl": "~1.0.2",
+        "escape-html": "~1.0.3",
+        "etag": "~1.8.1",
+        "fresh": "0.5.2",
+        "http-errors": "2.0.0",
+        "mime": "1.6.0",
+        "ms": "2.1.3",
+        "on-finished": "2.4.1",
+        "range-parser": "~1.2.1",
+        "statuses": "2.0.1"
+      },
+      "engines": {
+        "node": ">= 0.8.0"
+      }
+    },
+    "node_modules/send/node_modules/depd": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/depd/-/depd-2.0.0.tgz",
+      "integrity": "sha512-g7nH6P6dyDioJogAAGprGpCtVImJhpPk/roCzdb3fIh61/s/nPsfR6onyMwkCAR/OlC3yBC0lESvUoQEAssIrw==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/send/node_modules/http-errors": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/http-errors/-/http-errors-2.0.0.tgz",
+      "integrity": "sha512-FtwrG/euBzaEjYeRqOgly7G0qviiXoJWnvEH2Z1plBdXgbyjv34pHTSb9zoeHMyDy33+DWy5Wt9Wo+TURtOYSQ==",
+      "dependencies": {
+        "depd": "2.0.0",
+        "inherits": "2.0.4",
+        "setprototypeof": "1.2.0",
+        "statuses": "2.0.1",
+        "toidentifier": "1.0.1"
+      },
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/send/node_modules/inherits": {
+      "version": "2.0.4",
+      "resolved": "https://registry.npmjs.org/inherits/-/inherits-2.0.4.tgz",
+      "integrity": "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ=="
+    },
+    "node_modules/send/node_modules/ms": {
+      "version": "2.1.3",
+      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",
+      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="
+    },
+    "node_modules/send/node_modules/on-finished": {
+      "version": "2.4.1",
+      "resolved": "https://registry.npmjs.org/on-finished/-/on-finished-2.4.1.tgz",
+      "integrity": "sha512-oVlzkg3ENAhCk2zdv7IJwd/QUD4z2RxRwpkcGY8psCVcCYZNq4wYnVWALHM+brtuJjePWiYF/ClmuDr8Ch5+kg==",
+      "dependencies": {
+        "ee-first": "1.1.1"
+      },
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/send/node_modules/setprototypeof": {
+      "version": "1.2.0",
+      "resolved": "https://registry.npmjs.org/setprototypeof/-/setprototypeof-1.2.0.tgz",
+      "integrity": "sha512-E5LDX7Wrp85Kil5bhZv46j8jOeboKq5JMmYM3gVGdGH8xFpPWXUMsNrlODCrkoxMEeNi/XZIwuRvY4XNwYMJpw=="
+    },
+    "node_modules/send/node_modules/statuses": {
+      "version": "2.0.1",
+      "resolved": "https://registry.npmjs.org/statuses/-/statuses-2.0.1.tgz",
+      "integrity": "sha512-RwNA9Z/7PrK06rYLIzFMlaF+l73iwpzsqRIFgbMLbTcLD6cOao82TaWefPXQvB2fOC4AjuYSEndS7N/mTCbkdQ==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/serve-static": {
+      "version": "1.15.0",
+      "resolved": "https://registry.npmjs.org/serve-static/-/serve-static-1.15.0.tgz",
+      "integrity": "sha512-XGuRDNjXUijsUL0vl6nSD7cwURuzEgglbOaFuZM9g3kwDXOWVTck0jLzjPzGD+TazWbboZYu52/9/XPdUgne9g==",
+      "dependencies": {
+        "encodeurl": "~1.0.2",
+        "escape-html": "~1.0.3",
+        "parseurl": "~1.3.3",
+        "send": "0.18.0"
+      },
+      "engines": {
+        "node": ">= 0.8.0"
+      }
+    },
+    "node_modules/setprototypeof": {
+      "version": "1.1.0",
+      "resolved": "https://registry.npmjs.org/setprototypeof/-/setprototypeof-1.1.0.tgz",
+      "integrity": "sha512-BvE/TwpZX4FXExxOxZyRGQQv651MSwmWKZGqvmPcRIjDqWub67kTKuIMx43cZZrS/cBBzwBcNDWoFxt2XEFIpQ=="
+    },
+    "node_modules/side-channel": {
+      "version": "1.0.4",
+      "resolved": "https://registry.npmjs.org/side-channel/-/side-channel-1.0.4.tgz",
+      "integrity": "sha512-q5XPytqFEIKHkGdiMIrY10mvLRvnQh42/+GoBlFW3b2LXLE2xxJpZFdm94we0BaoV3RwJyGqg5wS7epxTv0Zvw==",
+      "dependencies": {
+        "call-bind": "^1.0.0",
+        "get-intrinsic": "^1.0.2",
+        "object-inspect": "^1.9.0"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/source-map": {
+      "version": "0.6.1",
+      "resolved": "https://registry.npmjs.org/source-map/-/source-map-0.6.1.tgz",
+      "integrity": "sha512-UjgapumWlbMhkBgzT7Ykc5YXUT46F0iKu8SGXq0bcwP5dz/h0Plj6enJqjz1Zbq2l5WaqYnrVbwWOWMyF3F47g==",
+      "engines": {
+        "node": ">=0.10.0"
+      }
+    },
+    "node_modules/statuses": {
+      "version": "1.4.0",
+      "resolved": "https://registry.npmjs.org/statuses/-/statuses-1.4.0.tgz",
+      "integrity": "sha512-zhSCtt8v2NDrRlPQpCNtw/heZLtfUDqxBM1udqikb/Hbk52LK4nQSwr10u77iopCW5LsyHpuXS0GnEc48mLeew==",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/toidentifier": {
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/toidentifier/-/toidentifier-1.0.1.tgz",
+      "integrity": "sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA==",
+      "engines": {
+        "node": ">=0.6"
+      }
+    },
+    "node_modules/type-is": {
+      "version": "1.6.18",
+      "resolved": "https://registry.npmjs.org/type-is/-/type-is-1.6.18.tgz",
+      "integrity": "sha512-TkRKr9sUTxEH8MdfuCSP7VizJyzRNMjj2J2do2Jr3Kym598JVdEksuzPQCnlFPW4ky9Q+iA+ma9BGm06XQBy8g==",
+      "dependencies": {
+        "media-typer": "0.3.0",
+        "mime-types": "~2.1.24"
+      },
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/uglify-js": {
+      "version": "3.17.4",
+      "resolved": "https://registry.npmjs.org/uglify-js/-/uglify-js-3.17.4.tgz",
+      "integrity": "sha512-T9q82TJI9e/C1TAxYvfb16xO120tMVFZrGA3f9/P4424DNu6ypK103y0GPFVa17yotwSyZW5iYXgjYHkGrJW/g==",
+      "optional": true,
+      "bin": {
+        "uglifyjs": "bin/uglifyjs"
+      },
+      "engines": {
+        "node": ">=0.8.0"
+      }
+    },
+    "node_modules/unpipe": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/unpipe/-/unpipe-1.0.0.tgz",
+      "integrity": "sha512-pjy2bYhSsufwWlKwPc+l3cN7+wuJlK6uz0YdJEOlQDbl6jo/YlPi4mb8agUkVC8BF7V8NuzeyPNqRksA3hztKQ==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/utils-merge": {
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/utils-merge/-/utils-merge-1.0.1.tgz",
+      "integrity": "sha512-pMZTvIkT1d+TFGvDOqodOclx0QWkkgi6Tdoa8gC8ffGAAqz9pzPTZWAybbsHHoED/ztMtkv/VoYTYyShUn81hA==",
+      "engines": {
+        "node": ">= 0.4.0"
+      }
+    },
+    "node_modules/vary": {
+      "version": "1.1.2",
+      "resolved": "https://registry.npmjs.org/vary/-/vary-1.1.2.tgz",
+      "integrity": "sha512-BNGbWLfd0eUPabhkXUVm0j8uuvREyTh5ovRa/dyow/BqAbZJyC+5fU+IzQOzmAKzYqYRAISoRhdQr3eIZ/PXqg==",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/walk": {
+      "version": "2.3.15",
+      "resolved": "https://registry.npmjs.org/walk/-/walk-2.3.15.tgz",
+      "integrity": "sha512-4eRTBZljBfIISK1Vnt69Gvr2w/wc3U6Vtrw7qiN5iqYJPH7LElcYh/iU4XWhdCy2dZqv1ToMyYlybDylfG/5Vg==",
+      "dependencies": {
+        "foreachasync": "^3.0.0"
+      }
+    },
+    "node_modules/wordwrap": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/wordwrap/-/wordwrap-1.0.0.tgz",
+      "integrity": "sha512-gvVzJFlPycKc5dZN4yPkP8w7Dc37BtP1yczEneOb4uq34pXZcvrtRTmWV8W+Ume+XCxKgbjM+nevkyFPMybd4Q=="
+    }
+  }
+}
+
+
+--- File: package.json ---
+{
+  "name": "cafe-quintal",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node ./bin/www"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "~1.4.4",
+    "debug": "~2.6.9",
+    "express": "^4.18.2",
+    "hbs": "^4.2.0",
+    "http-errors": "~1.6.3",
+    "morgan": "~1.9.1"
+  }
+}
+
+
+--- File: public/stylesheets/style.css ---
+body {
+  padding: 50px;
+  font: 14px "Lucida Grande", Helvetica, Arial, sans-serif;
+}
+
+a {
+  color: #00B7FF;
+}
+
+
+--- File: routes/auth-routes/auth.routes.js ---
+
+
+--- File: routes/index.js ---
+const express = require('express');
+const router = express.Router();
+
+/* GET home page. */
+router.get('/', function(req, res, next) {
+  res.render('index', { title: 'Express' });
+});
+
+module.exports = router;
+
+
+--- File: routes/users.js ---
+const express = require('express');
+const router = express.Router();
+
+
+
+/* GET users listing. */
+router.get('/', function(req, res, next) {
+  res.send('respond with a resource');
+});
+
+module.exports = router;
+
+
+--- File: views/auth/login.hbs ---
+{{#extend "main"}}
+{{#content "body"}}
+<h1>Login</h1>
+<form action="/login" method="post">
+    <label for="username">Username:</label>
+    <input type="text" id="username" name="username" required>
+    <label for="password">Password:</label>
+    <input type="password" id="password" name="password" required>
+    <input type="submit" value="Log In">
+</form>
+{{/content}}
+{{/extend}}
+
+--- File: views/auth/signup.hbs ---
+{{#extend "main"}}
+{{#content "body"}}
+<h1>Sign Up</h1>
+<form action="/signup" method="post">
+    <label for="username">Username:</label>
+    <input type="text" id="username" name="username" required>
+    <label for="password">Password:</label>
+    <input type="password" id="password" name="password" required>
+    <input type="submit" value="Sign Up">
+</form>
+{{/content}}
+{{/extend}}
+
+
+--- File: views/error.hbs ---
+{{#extend "main"}}
+{{#content "body"}}
+<h1>Error</h1>
+<p>{{errorMessage}}</p>
+<a href="/">Go back to home page</a>
+{{/content}}
+{{/extend}}
+
+--- File: views/index.hbs ---
+{{#extend "main"}}
+{{#content "body"}}
+<h1>Welcome to Our Coffee Shop</h1>
+<ul>
+    {{#each products}}
+    <li>{{this.name}} - {{this.price}}</li>
+    {{/each}}
+</ul>
+{{/content}}
+{{/extend}}
+
+
+--- File: views/layout.hbs ---
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{title}}</title>
+    <link href="/public/stylesheets/style.css">
+</head>
+<body>
+    <header>
+        <!-- Navigation goes here -->
+    </header>
+
+    {{{body}}}
+
+    <footer>
+        <!-- Footer goes here -->
+    </footer>
+</body>
+</html>
+
