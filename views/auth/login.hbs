@@ -1,5 +1,4 @@
-{{#extend "main"}}
-{{#content "body"}}
+{{>header}}
 <h1>Login</h1>
 <form action="/login" method="post">
     <label for="username">Username:</label>
@@ -8,5 +7,4 @@
     <input type="password" id="password" name="password" required>
     <input type="submit" value="Log In">
 </form>
-{{/content}}
-{{/extend}}
+{{>footer}}
